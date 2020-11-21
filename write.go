@@ -5,16 +5,22 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strconv"
+
+	"time"
+
 	"github.com/Rhymen/go-whatsapp/binary"
 	"github.com/Rhymen/go-whatsapp/crypto/cbc"
 	"github.com/gorilla/websocket"
 	"github.com/pkg/errors"
-	"strconv"
-	"time"
 )
 
 //writeJson enqueues a json message into the writeChan
 func (wac *Conn) writeJson(data []interface{}) (<-chan string, error) {
+
+	wac.writerLock.Lock()
+	defer wac.writerLock.Unlock()
+
 	d, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
@@ -23,6 +29,11 @@ func (wac *Conn) writeJson(data []interface{}) (<-chan string, error) {
 	ts := time.Now().Unix()
 	messageTag := fmt.Sprintf("%d.--%d", ts, wac.msgCount)
 	bytes := []byte(fmt.Sprintf("%s,%s", messageTag, d))
+
+	if wac.timeTag == "" {
+		tss := fmt.Sprintf("%d", ts)
+		wac.timeTag = tss[len(tss)-3:]
+	}
 
 	ch, err := wac.write(websocket.TextMessage, messageTag, bytes)
 	if err != nil {
@@ -37,6 +48,9 @@ func (wac *Conn) writeBinary(node binary.Node, metric metric, flag flag, message
 	if len(messageTag) < 2 {
 		return nil, ErrMissingMessageTag
 	}
+
+	wac.writerLock.Lock()
+	defer wac.writerLock.Unlock()
 
 	data, err := wac.encryptBinaryMessage(node)
 	if err != nil {
@@ -78,13 +92,13 @@ func (wac *Conn) sendKeepAlive() error {
 	return nil
 }
 
-/* 
+/*
 	When phone is unreachable, WhatsAppWeb sends ["admin","test"] time after time to try a successful contact.
 	Tested with Airplane mode and no connection at all.
 */
 func (wac *Conn) sendAdminTest() (bool, error) {
 	data := []interface{}{"admin", "test"}
-	
+
 	r, err := wac.writeJson(data)
 	if err != nil {
 		return false, errors.Wrap(err, "error sending admin test")
@@ -103,9 +117,9 @@ func (wac *Conn) sendAdminTest() (bool, error) {
 
 	if len(response) == 2 && response[0].(string) == "Pong" && response[1].(bool) == true {
 		return true, nil
-	} else{
+	} else {
 		return false, nil
-	}	
+	}
 }
 
 func (wac *Conn) write(messageType int, answerMessageTag string, data []byte) (<-chan string, error) {
@@ -118,6 +132,9 @@ func (wac *Conn) write(messageType int, answerMessageTag string, data []byte) (<
 		wac.listener.Unlock()
 	}
 
+	if wac == nil || wac.ws == nil {
+		return nil, ErrInvalidWebsocket
+	}
 	wac.ws.Lock()
 	err := wac.ws.conn.WriteMessage(messageType, data)
 	wac.ws.Unlock()

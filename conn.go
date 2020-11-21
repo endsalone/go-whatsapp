@@ -4,6 +4,7 @@ package whatsapp
 import (
 	"math/rand"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 
@@ -87,10 +88,16 @@ type Conn struct {
 	Store          *Store
 	ServerLastSeen time.Time
 
+	timeTag string // last 3 digits obtained after a successful login takeover
+
 	longClientName  string
 	shortClientName string
+	clientVersion   string
 
 	loginSessionLock sync.RWMutex
+	Proxy            func(*http.Request) (*url.URL, error)
+
+	writerLock sync.RWMutex
 }
 
 type websocketWrapper struct {
@@ -109,14 +116,59 @@ Creates a new connection with a given timeout. The websocket connection to the W
 The goroutine for handling incoming messages is started
 */
 func NewConn(timeout time.Duration) (*Conn, error) {
+	return NewConnWithOptions(&Options{
+		Timeout: timeout,
+	})
+}
+
+// NewConnWithProxy Create a new connect with a given timeout and a http proxy.
+func NewConnWithProxy(timeout time.Duration, proxy func(*http.Request) (*url.URL, error)) (*Conn, error) {
+	return NewConnWithOptions(&Options{
+		Timeout: timeout,
+		Proxy: proxy,
+	})
+}
+
+// NewConnWithOptions Create a new connect with a given options.
+type Options struct {
+	Proxy            func(*http.Request) (*url.URL, error)
+	Timeout          time.Duration
+	Handler          []Handler
+	ShortClientName  string
+	LongClientName   string
+	ClientVersion    string
+	Store            *Store
+}
+func NewConnWithOptions(opt *Options) (*Conn, error) {
+	if opt == nil {
+		return nil, ErrOptionsNotProvided
+	}
 	wac := &Conn{
 		handler:    make([]Handler, 0),
 		msgCount:   0,
-		msgTimeout: timeout,
+		msgTimeout: opt.Timeout,
 		Store:      newStore(),
-
-		longClientName:  "github.com/rhymen/go-whatsapp",
+		longClientName:  "github.com/Rhymen/go-whatsapp",
 		shortClientName: "go-whatsapp",
+		clientVersion:   "0.1.0",
+	}
+	if opt.Handler != nil {
+		wac.handler = opt.Handler
+	}
+	if opt.Store != nil {
+		wac.Store = opt.Store
+	}
+	if opt.Proxy != nil {
+		wac.Proxy = opt.Proxy
+	}
+	if len(opt.ShortClientName) != 0 {
+		wac.shortClientName = opt.ShortClientName
+	}
+	if len(opt.LongClientName) != 0 {
+		wac.longClientName = opt.LongClientName
+	}
+	if len(opt.ClientVersion) != 0 {
+		wac.clientVersion = opt.ClientVersion
 	}
 	return wac, wac.connect()
 }
@@ -134,9 +186,10 @@ func (wac *Conn) connect() (err error) {
 	}()
 
 	dialer := &websocket.Dialer{
-		ReadBufferSize:   25 * 1024 * 1024,
-		WriteBufferSize:  10 * 1024 * 1024,
+		ReadBufferSize:   0,
+		WriteBufferSize:  0,
 		HandshakeTimeout: wac.msgTimeout,
+		Proxy:            wac.Proxy,
 	}
 
 	headers := http.Header{"Origin": []string{"https://web.whatsapp.com"}}
@@ -202,7 +255,7 @@ func (wac *Conn) AdminTest() (bool, error) {
 		return false, ErrInvalidSession
 	}
 
-	result, err := wac.sendAdminTest()			
+	result, err := wac.sendAdminTest()
 	return result, err
 }
 
@@ -222,4 +275,12 @@ func (wac *Conn) keepAlive(minIntervalMs int, maxIntervalMs int) {
 			return
 		}
 	}
+}
+
+func (wac *Conn) GetConnected() bool {
+	return  wac.connected
+}
+
+func (wac *Conn) GetLoggedIn() bool {
+	return  wac.loggedIn
 }
